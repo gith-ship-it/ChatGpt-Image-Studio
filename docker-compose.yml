@@ -8,6 +8,7 @@ services:
     environment:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 7000
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./backend/data:/app/backend/data
     restart: unless-stopped

@@ -187,9 +187,8 @@ var (
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
 func getParseTime() string {
-	loc, _ := time.LoadLocation("America/New_York")
-	now := time.Now().In(loc)
-	return now.Format("Mon Jan 02 2006 15:04:05") + " GMT-0500 (Eastern Standard Time)"
+	loc := loadLocationOrFixed(parseTimeZoneName, parseTimeFallbackOffsetSecs)
+	return formatBrowserParseTime(time.Now(), loc)
 }
 
 func buildConfig(userAgent string) []any {
@@ -198,24 +197,24 @@ func buildConfig(userAgent string) []any {
 	epochOffset := float64(now.UnixMilli()) - perfCounter
 
 	return []any{
-		screenSizes[mrand.IntN(len(screenSizes))],                // 0: screen size
-		getParseTime(),                                           // 1: parse time
-		4294705152,                                               // 2: constant
-		0,                                                        // 3: nonce_i (dynamic)
-		userAgent,                                                // 4: user agent
-		"https://chatgpt.com/backend-api/sentinel/sdk.js",        // 5: script url
-		"",                                                       // 6: dpl
-		"en-US",                                                  // 7
-		"en-US,es-US,en,es",                                      // 8
-		0,                                                        // 9: nonce_j (dynamic)
-		navigatorKey[mrand.IntN(len(navigatorKey))],              // 10
-		documentKey[mrand.IntN(len(documentKey))],                // 11
-		windowKey[mrand.IntN(len(windowKey))],                    // 12
-		perfCounter,                                              // 13
-		uuid.NewString(),                                         // 14
-		"",                                                       // 15
-		coreCounts[mrand.IntN(len(coreCounts))],                  // 16
-		epochOffset,                                              // 17
+		screenSizes[mrand.IntN(len(screenSizes))], // 0: screen size
+		getParseTime(), // 1: parse time
+		4294705152,     // 2: constant
+		0,              // 3: nonce_i (dynamic)
+		userAgent,      // 4: user agent
+		"https://chatgpt.com/backend-api/sentinel/sdk.js", // 5: script url
+		"",                  // 6: dpl
+		"en-US",             // 7
+		"en-US,es-US,en,es", // 8
+		0,                   // 9: nonce_j (dynamic)
+		navigatorKey[mrand.IntN(len(navigatorKey))], // 10
+		documentKey[mrand.IntN(len(documentKey))],   // 11
+		windowKey[mrand.IntN(len(windowKey))],       // 12
+		perfCounter,                                 // 13
+		uuid.NewString(),                            // 14
+		"",                                          // 15
+		coreCounts[mrand.IntN(len(coreCounts))],     // 16
+		epochOffset,                                 // 17
 	}
 }
 

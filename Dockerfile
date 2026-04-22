@@ -17,7 +17,7 @@ COPY backend/ ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/chatgpt2api-studio .
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates && update-ca-certificates
+RUN apk add --no-cache ca-certificates tzdata && update-ca-certificates
 
 WORKDIR /app/backend
 

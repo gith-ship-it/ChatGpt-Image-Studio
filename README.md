@@ -154,6 +154,7 @@ docker compose up --build
 
 - 服务默认监听 `7000`
 - `./backend/data` 会挂载到容器内 `/app/backend/data`
+- `docker-compose.yml` 默认设置 `TZ=${TZ:-Asia/Shanghai}`，如需其他时区可在启动前覆盖 `TZ`
 - 本地认证文件、同步状态、本地配置都保存在宿主机，不会丢失
 
 ## 主要接口
