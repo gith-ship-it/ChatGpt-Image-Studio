@@ -2,7 +2,7 @@
 
 import localforage from "localforage";
 
-import type { ImageModel } from "@/lib/api";
+import type { ImageModel, ImageQuality } from "@/lib/api";
 
 export type ImageMode = "generate" | "edit" | "upscale";
 
@@ -35,6 +35,8 @@ export type ImageConversationTurn = {
   prompt: string;
   model: ImageModel;
   count: number;
+  size?: string;
+  quality?: ImageQuality;
   scale?: string;
   sourceImages?: StoredSourceImage[];
   images: StoredImage[];
@@ -50,6 +52,8 @@ export type ImageConversation = {
   prompt: string;
   model: ImageModel;
   count: number;
+  size?: string;
+  quality?: ImageQuality;
   scale?: string;
   sourceImages?: StoredSourceImage[];
   images: StoredImage[];
@@ -93,6 +97,13 @@ async function loadConversationCache(): Promise<ImageConversation[]> {
   return loadPromise;
 }
 
+export function getCachedImageConversationsSnapshot(): ImageConversation[] | null {
+  if (!cachedConversations) {
+    return null;
+  }
+  return sortConversations(cachedConversations.map(normalizeConversation));
+}
+
 async function persistConversationCache() {
   const snapshot = sortConversations((cachedConversations || []).map(normalizeConversation));
   cachedConversations = snapshot;
@@ -112,10 +123,15 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
   };
 }
 
+function normalizeImageQuality(value: ImageConversationTurn["quality"]): ImageQuality | undefined {
+  return value === "low" || value === "medium" || value === "high" ? value : undefined;
+}
+
 function normalizeTurn(turn: ImageConversationTurn): ImageConversationTurn {
   return {
     ...turn,
     mode: turn.mode || "generate",
+    quality: normalizeImageQuality(turn.quality),
     sourceImages: Array.isArray(turn.sourceImages) ? turn.sourceImages : [],
     images: (turn.images || []).map(normalizeStoredImage),
   };
@@ -133,6 +149,8 @@ export function normalizeConversation(conversation: ImageConversation): ImageCon
             prompt: conversation.prompt,
             model: conversation.model,
             count: conversation.count,
+            size: conversation.size,
+            quality: conversation.quality,
             scale: conversation.scale,
             sourceImages: conversation.sourceImages,
             images: conversation.images || [],
@@ -150,6 +168,8 @@ export function normalizeConversation(conversation: ImageConversation): ImageCon
     prompt: latestTurn.prompt,
     model: latestTurn.model,
     count: latestTurn.count,
+    size: latestTurn.size,
+    quality: latestTurn.quality,
     scale: latestTurn.scale,
     sourceImages: latestTurn.sourceImages,
     images: latestTurn.images,

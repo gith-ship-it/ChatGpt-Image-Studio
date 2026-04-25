@@ -81,7 +81,7 @@ export default function RequestsPage() {
         <Card className="border-stone-200 bg-white shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
           <CardContent className="p-0">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1120px] text-left">
+              <table className="w-full min-w-[1240px] text-left">
                 <thead className="border-b border-stone-100 bg-stone-50/80 text-[11px] uppercase tracking-[0.18em] text-stone-400">
                   <tr>
                     <th className="px-4 py-3 whitespace-nowrap">时间</th>
@@ -89,7 +89,9 @@ export default function RequestsPage() {
                     <th className="px-4 py-3 whitespace-nowrap">模式</th>
                     <th className="px-4 py-3 whitespace-nowrap">方向</th>
                     <th className="px-4 py-3 whitespace-nowrap">路由</th>
+                    <th className="px-4 py-3 whitespace-nowrap">CPA 子路由</th>
                     <th className="px-4 py-3 whitespace-nowrap">接口</th>
+                    <th className="px-4 py-3 whitespace-nowrap">参数</th>
                     <th className="px-4 py-3 whitespace-nowrap">账号</th>
                     <th className="px-4 py-3 whitespace-nowrap">模型</th>
                     <th className="px-4 py-3 whitespace-nowrap">结果</th>
@@ -115,7 +117,17 @@ export default function RequestsPage() {
                         </Badge>
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">{item.route || "—"}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">{item.cpaSubroute || "—"}</td>
                       <td className="px-4 py-3 whitespace-nowrap">{item.endpoint || "—"}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <div className="text-stone-700">{item.size || "—"}</div>
+                        <div className="text-xs text-stone-400">{item.quality ? `quality: ${item.quality}` : "quality: —"}</div>
+                        <div className="text-xs text-stone-400">
+                          {typeof item.promptLength === "number" && item.promptLength > 0
+                            ? `prompt: ${item.promptLength} 字`
+                            : "prompt: —"}
+                        </div>
+                      </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <div className="truncate text-stone-700" title={item.accountEmail || item.accountFile || ""}>
                           {item.accountEmail || "—"}
@@ -127,6 +139,7 @@ export default function RequestsPage() {
                       <td className="px-4 py-3 whitespace-nowrap">
                         <div className="text-stone-700">{item.requestedModel || "—"}</div>
                         <div className="text-xs text-stone-400">{item.upstreamModel || "—"}</div>
+                        <div className="text-xs text-stone-400">{item.imageToolModel ? `tool: ${item.imageToolModel}` : "—"}</div>
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <Badge variant={item.success ? "success" : "danger"} className="rounded-md px-2 py-1">

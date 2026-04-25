@@ -323,6 +323,55 @@ func TestAcquireImageAuthFilteredAcceptsPaidAccountInferredFromAccessToken(t *te
 	}
 }
 
+func TestAcquireImageAuthFilteredWithDisabledOptionAllowsDisabledAccount(t *testing.T) {
+	rootDir := t.TempDir()
+	authDir := filepath.Join(rootDir, "auths")
+	syncDir := filepath.Join(rootDir, "sync")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	if err := os.MkdirAll(syncDir, 0o755); err != nil {
+		t.Fatalf("mkdir sync dir: %v", err)
+	}
+
+	store := &Store{
+		authDir:      authDir,
+		syncStateDir: syncDir,
+		stateFile:    filepath.Join(rootDir, "state.json"),
+		defaultQuota: 5,
+		providerType: "codex",
+		states: map[string]RuntimeState{
+			"disabled.json": {
+				Type:       "Plus",
+				Status:     "禁用",
+				Quota:      3,
+				QuotaKnown: true,
+			},
+		},
+	}
+
+	if err := writeJSONFile(filepath.Join(authDir, "disabled.json"), map[string]any{
+		"type":         "codex",
+		"access_token": "token-disabled",
+		"email":        "disabled@example.com",
+		"disabled":     true,
+	}); err != nil {
+		t.Fatalf("seed disabled auth file: %v", err)
+	}
+
+	if _, _, err := store.AcquireImageAuthFiltered(nil, nil); !errors.Is(err, ErrNoAvailableImageAuth) {
+		t.Fatalf("AcquireImageAuthFiltered() error = %v, want ErrNoAvailableImageAuth", err)
+	}
+
+	_, account, err := store.AcquireImageAuthFilteredWithDisabledOption(nil, nil, true)
+	if err != nil {
+		t.Fatalf("AcquireImageAuthFilteredWithDisabledOption() returned error: %v", err)
+	}
+	if account.Email != "disabled@example.com" {
+		t.Fatalf("AcquireImageAuthFilteredWithDisabledOption() email = %q, want %q", account.Email, "disabled@example.com")
+	}
+}
+
 func mustTestJWT(t *testing.T, payload map[string]any) string {
 	t.Helper()
 

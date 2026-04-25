@@ -22,16 +22,17 @@ type configPayload struct {
 		StaticDir string `json:"staticDir"`
 	} `json:"server"`
 	ChatGPT struct {
-		Model          string `json:"model"`
-		SSETimeout     int    `json:"sseTimeout"`
-		PollInterval   int    `json:"pollInterval"`
-		PollMaxWait    int    `json:"pollMaxWait"`
-		RequestTimeout int    `json:"requestTimeout"`
-		ImageMode      string `json:"imageMode"`
-		FreeImageRoute string `json:"freeImageRoute"`
-		FreeImageModel string `json:"freeImageModel"`
-		PaidImageRoute string `json:"paidImageRoute"`
-		PaidImageModel string `json:"paidImageModel"`
+		Model                            string `json:"model"`
+		SSETimeout                       int    `json:"sseTimeout"`
+		PollInterval                     int    `json:"pollInterval"`
+		PollMaxWait                      int    `json:"pollMaxWait"`
+		RequestTimeout                   int    `json:"requestTimeout"`
+		ImageMode                        string `json:"imageMode"`
+		FreeImageRoute                   string `json:"freeImageRoute"`
+		FreeImageModel                   string `json:"freeImageModel"`
+		PaidImageRoute                   string `json:"paidImageRoute"`
+		PaidImageModel                   string `json:"paidImageModel"`
+		StudioAllowDisabledImageAccounts bool   `json:"studioAllowDisabledImageAccounts"`
 	} `json:"chatgpt"`
 	Accounts struct {
 		DefaultQuota        int  `json:"defaultQuota"`
@@ -62,6 +63,7 @@ type configPayload struct {
 		BaseURL        string `json:"baseUrl"`
 		APIKey         string `json:"apiKey"`
 		RequestTimeout int    `json:"requestTimeout"`
+		RouteStrategy  string `json:"routeStrategy"`
 	} `json:"cpa"`
 	Log struct {
 		LogAllRequests bool `json:"logAllRequests"`
@@ -104,16 +106,17 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			"static_dir": payload.Server.StaticDir,
 		},
 		"chatgpt": {
-			"model":            payload.ChatGPT.Model,
-			"sse_timeout":      payload.ChatGPT.SSETimeout,
-			"poll_interval":    payload.ChatGPT.PollInterval,
-			"poll_max_wait":    payload.ChatGPT.PollMaxWait,
-			"request_timeout":  payload.ChatGPT.RequestTimeout,
-			"image_mode":       payload.ChatGPT.ImageMode,
-			"free_image_route": payload.ChatGPT.FreeImageRoute,
-			"free_image_model": payload.ChatGPT.FreeImageModel,
-			"paid_image_route": payload.ChatGPT.PaidImageRoute,
-			"paid_image_model": payload.ChatGPT.PaidImageModel,
+			"model":                                payload.ChatGPT.Model,
+			"sse_timeout":                          payload.ChatGPT.SSETimeout,
+			"poll_interval":                        payload.ChatGPT.PollInterval,
+			"poll_max_wait":                        payload.ChatGPT.PollMaxWait,
+			"request_timeout":                      payload.ChatGPT.RequestTimeout,
+			"image_mode":                           payload.ChatGPT.ImageMode,
+			"free_image_route":                     payload.ChatGPT.FreeImageRoute,
+			"free_image_model":                     payload.ChatGPT.FreeImageModel,
+			"paid_image_route":                     payload.ChatGPT.PaidImageRoute,
+			"paid_image_model":                     payload.ChatGPT.PaidImageModel,
+			"studio_allow_disabled_image_accounts": payload.ChatGPT.StudioAllowDisabledImageAccounts,
 		},
 		"accounts": {
 			"default_quota":         payload.Accounts.DefaultQuota,
@@ -144,6 +147,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			"base_url":        payload.CPA.BaseURL,
 			"api_key":         payload.CPA.APIKey,
 			"request_timeout": payload.CPA.RequestTimeout,
+			"route_strategy":  payload.CPA.RouteStrategy,
 		},
 		"log": {
 			"log_all_requests": payload.Log.LogAllRequests,
@@ -192,6 +196,7 @@ func (s *Server) buildConfigPayloadFromConfig(cfg *config.Config) configPayload 
 	payload.ChatGPT.FreeImageModel = cfg.ChatGPT.FreeImageModel
 	payload.ChatGPT.PaidImageRoute = cfg.ChatGPT.PaidImageRoute
 	payload.ChatGPT.PaidImageModel = cfg.ChatGPT.PaidImageModel
+	payload.ChatGPT.StudioAllowDisabledImageAccounts = cfg.ChatGPT.StudioAllowDisabledImageAccounts
 
 	payload.Accounts.DefaultQuota = cfg.Accounts.DefaultQuota
 	payload.Accounts.PreferRemoteRefresh = cfg.Accounts.PreferRemoteRefresh
@@ -217,6 +222,7 @@ func (s *Server) buildConfigPayloadFromConfig(cfg *config.Config) configPayload 
 	payload.CPA.BaseURL = cfg.CPA.BaseURL
 	payload.CPA.APIKey = cfg.CPA.APIKey
 	payload.CPA.RequestTimeout = cfg.CPA.RequestTimeout
+	payload.CPA.RouteStrategy = cfg.CPA.RouteStrategy
 
 	payload.Log.LogAllRequests = cfg.Log.LogAllRequests
 	payload.Paths = s.cfg.Paths()

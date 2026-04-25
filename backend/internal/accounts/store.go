@@ -649,14 +649,18 @@ func (s *Store) FindImageAuthByID(accountID string) (*LocalAuth, PublicAccount, 
 }
 
 func (s *Store) AcquireImageAuth(excluded map[string]struct{}) (*LocalAuth, PublicAccount, error) {
-	return s.acquireImageAuth(excluded, nil)
+	return s.acquireImageAuth(excluded, nil, false)
 }
 
 func (s *Store) AcquireImageAuthFiltered(excluded map[string]struct{}, allow func(PublicAccount) bool) (*LocalAuth, PublicAccount, error) {
-	return s.acquireImageAuth(excluded, allow)
+	return s.acquireImageAuth(excluded, allow, false)
 }
 
-func (s *Store) acquireImageAuth(excluded map[string]struct{}, allow func(PublicAccount) bool) (*LocalAuth, PublicAccount, error) {
+func (s *Store) AcquireImageAuthFilteredWithDisabledOption(excluded map[string]struct{}, allow func(PublicAccount) bool, allowDisabled bool) (*LocalAuth, PublicAccount, error) {
+	return s.acquireImageAuth(excluded, allow, allowDisabled)
+}
+
+func (s *Store) acquireImageAuth(excluded map[string]struct{}, allow func(PublicAccount) bool, allowDisabled bool) (*LocalAuth, PublicAccount, error) {
 	localAuths, err := s.loadAuths()
 	if err != nil {
 		return nil, PublicAccount{}, err
@@ -680,11 +684,11 @@ func (s *Store) acquireImageAuth(excluded map[string]struct{}, allow func(Public
 		if allow != nil && !allow(account) {
 			continue
 		}
-		ready := isUsableImageAccount(account)
+		ready := isUsableImageAccount(account, allowDisabled)
 		refreshNeeded := NeedsImageQuotaRefresh(account, now)
 		if auth.AccessToken == "" ||
-			auth.Disabled ||
-			account.Status == "禁用" ||
+			(auth.Disabled && !allowDisabled) ||
+			(account.Status == "禁用" && !allowDisabled) ||
 			account.Status == "异常" ||
 			(!ready && !refreshNeeded) {
 			continue
@@ -770,8 +774,8 @@ func NeedsImageQuotaRefresh(account PublicAccount, now time.Time) bool {
 	return !now.Before(resetAt)
 }
 
-func isUsableImageAccount(account PublicAccount) bool {
-	return account.Status != "禁用" &&
+func isUsableImageAccount(account PublicAccount, allowDisabled bool) bool {
+	return (allowDisabled || account.Status != "禁用") &&
 		account.Status != "异常" &&
 		account.Status != "限流" &&
 		account.Quota > 0

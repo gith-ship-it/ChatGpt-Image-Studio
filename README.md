@@ -100,6 +100,12 @@ chmod +x ./scripts/*.sh
 
 当前仓库支持通过 GitHub Container Registry 直接拉取镜像部署。
 
+镜像发布规则：
+
+- 推送到 `main` 分支后，GitHub Actions 会自动更新 `ghcr.io/peiyizhi0724/chatgpt-image-studio:latest`
+- 推送版本标签 `v1.2.x` 后，会额外发布同名版本镜像标签
+- Docker 镜像同时提供 `linux/amd64` 与 `linux/arm64`
+
 ### 首次启动
 
 ```bash
@@ -109,14 +115,14 @@ docker compose up -d
 
 默认会：
 
-- 使用 `ghcr.io/peiyizhi0724/chatgpt-image-studio:latest`
+- 使用 `ghcr.io/peiyizhi0724/chatgpt-image-studio:latest`，也就是 `main` 分支当前最新镜像
 - 将宿主机的 `./backend/data` 挂载到容器内 `/app/data`
 - 对外暴露 `7000` 端口
 
 如需固定到某个版本，可先设置：
 
 ```bash
-export IMAGE_TAG=v1.2.5
+export IMAGE_TAG=v1.2.7
 docker compose pull
 docker compose up -d
 ```
@@ -124,7 +130,7 @@ docker compose up -d
 Windows PowerShell：
 
 ```powershell
-$env:IMAGE_TAG = "v1.2.5"
+$env:IMAGE_TAG = "v1.2.7"
 docker compose pull
 docker compose up -d
 ```
@@ -148,7 +154,7 @@ chmod +x ./scripts/docker-update.sh
 
 1. 检查 Docker / Docker Compose
 2. 如果当前目录是 Git 仓库，则先 `git pull --ff-only origin main`
-3. 从 GitHub Container Registry 拉取最新镜像
+3. 从 GitHub Container Registry 拉取 `latest` 镜像
 4. 重新创建并启动容器
 
 ### 配置文件
@@ -267,6 +273,25 @@ macOS / Linux：
 - `npx tsc --noEmit`
 - `npm run lint`
 - `npm run build`
+
+如需额外验证 `Studio / CPA` 以及旧版 `mix -> studio` 兼容迁移的图片路由，可打开可选黑盒测试：
+
+macOS / Linux：
+
+```bash
+RUN_IMAGE_MODE_COMPAT_TESTS=1 ./scripts/check.sh
+```
+
+Windows PowerShell：
+
+```powershell
+$env:RUN_IMAGE_MODE_COMPAT_TESTS = "1"
+./scripts/check.ps1
+```
+
+这组测试默认不会在普通检查里执行，只在显式设置环境变量后追加运行：
+
+- `go test ./api -run TestImageModeCompatibilityBlackBox -count=1`
 
 ## 启动失败兜底
 

@@ -18,11 +18,16 @@ type imageRequestLogEntry struct {
 	ImageMode      string `json:"imageMode"`
 	Direction      string `json:"direction"`
 	Route          string `json:"route"`
+	CPASubroute    string `json:"cpaSubroute,omitempty"`
 	AccountType    string `json:"accountType,omitempty"`
 	AccountEmail   string `json:"accountEmail,omitempty"`
 	AccountFile    string `json:"accountFile,omitempty"`
 	RequestedModel string `json:"requestedModel,omitempty"`
 	UpstreamModel  string `json:"upstreamModel,omitempty"`
+	ImageToolModel string `json:"imageToolModel,omitempty"`
+	Size           string `json:"size,omitempty"`
+	Quality        string `json:"quality,omitempty"`
+	PromptLength   int    `json:"promptLength,omitempty"`
 	Preferred      bool   `json:"preferred"`
 	Success        bool   `json:"success"`
 	Error          string `json:"error,omitempty"`

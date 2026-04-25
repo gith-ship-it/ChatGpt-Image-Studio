@@ -2,6 +2,9 @@ package api
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"chatgpt2api/internal/accounts"
@@ -76,6 +79,20 @@ func TestConfiguredImageRoute(t *testing.T) {
 	}
 }
 
+func TestConfiguredImageModeTreatsLegacyMixAsStudio(t *testing.T) {
+	server := &Server{
+		cfg: &config.Config{
+			ChatGPT: config.ChatGPTConfig{
+				ImageMode: "mix",
+			},
+		},
+	}
+
+	if got := server.configuredImageMode(); got != "studio" {
+		t.Fatalf("configuredImageMode() = %q, want %q", got, "studio")
+	}
+}
+
 func TestResolveImageUpstreamModelFromConfig(t *testing.T) {
 	server := &Server{
 		cfg: &config.Config{
@@ -141,5 +158,108 @@ func TestResolveImageAcquireError(t *testing.T) {
 				t.Fatalf("resolveImageAcquireError() code = %q, want %q", requestErrorCode(got), tt.wantCode)
 			}
 		})
+	}
+}
+
+func TestNormalizeGenerateImageSize(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "empty size uses default upstream behavior",
+			input: "",
+			want:  "",
+		},
+		{
+			name:  "supported landscape size passes through",
+			input: "1536x1024",
+			want:  "1536x1024",
+		},
+		{
+			name:  "uppercase separator is normalized",
+			input: "1024X1536",
+			want:  "1024x1536",
+		},
+		{
+			name:  "unsupported large size now passes through normalized",
+			input: "8192x8192",
+			want:  "8192x8192",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeGenerateImageSize(tt.input)
+			if got != tt.want {
+				t.Fatalf("normalizeGenerateImageSize() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStudioPaidResolutionUsesPaidAccount(t *testing.T) {
+	server, recorder := newImageModeCompatTestServerWithOptions(t, imageModeCompatScenario{
+		imageMode:   "studio",
+		accountType: "Plus",
+		freeRoute:   "legacy",
+		freeModel:   "auto",
+		paidRoute:   "responses",
+		paidModel:   "gpt-5.4-mini",
+	}, compatTestServerOptions{
+		accounts: []compatSeedAccount{
+			{
+				fileName:    "free.json",
+				accessToken: "token-free-priority",
+				accountType: "Free",
+				priority:    100,
+				quota:       5,
+				status:      "正常",
+			},
+			{
+				fileName:    "paid.json",
+				accessToken: "token-paid",
+				accountType: "Plus",
+				priority:    1,
+				quota:       5,
+				status:      "正常",
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"test prompt","size":"2560x1440","quality":"high","response_format":"b64_json"}`))
+	req.Header.Set("Authorization", "Bearer "+server.cfg.App.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	entries := server.reqLogs.list(1)
+	if len(entries) != 1 {
+		t.Fatalf("log entries = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.AccountType != "Plus" {
+		t.Fatalf("account type = %q, want %q", entry.AccountType, "Plus")
+	}
+	if entry.Size != "2560x1440" {
+		t.Fatalf("log size = %q, want %q", entry.Size, "2560x1440")
+	}
+	if entry.Quality != "high" {
+		t.Fatalf("log quality = %q, want %q", entry.Quality, "high")
+	}
+	if entry.PromptLength != 11 {
+		t.Fatalf("log prompt length = %d, want 11", entry.PromptLength)
+	}
+	if recorder.lastFactory != "responses" {
+		t.Fatalf("last factory = %q, want %q", recorder.lastFactory, "responses")
+	}
+	if got := recorder.callSequence[len(recorder.callSequence)-1]; !strings.Contains(got, "token-paid") {
+		t.Fatalf("call sequence = %v, want paid token selected", recorder.callSequence)
 	}
 }
