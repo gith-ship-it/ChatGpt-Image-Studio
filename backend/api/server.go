@@ -39,6 +39,7 @@ type Server struct {
 	staticDir              string
 	reqLogs                *imageRequestLogStore
 	imageAdmission         *imageAdmissionController
+	imageTasks             *imageTaskManager
 	officialClientFactory  func(accessToken, proxyURL string, authData map[string]any, requestConfig handler.ImageRequestConfig) imageWorkflowClient
 	responsesClientFactory func(accessToken, proxyURL string, authData map[string]any, requestConfig handler.ImageRequestConfig) imageWorkflowClient
 	cpaClientFactory       func(baseURL, apiKey string, timeout time.Duration, routeStrategy string) cpaRouteAwareImageWorkflowClient
@@ -78,7 +79,7 @@ func (e *requestError) Error() string {
 }
 
 func NewServer(cfg *config.Config, store *accounts.Store, syncClient *cliproxy.Client) *Server {
-	return &Server{
+	server := &Server{
 		cfg:            cfg,
 		store:          store,
 		syncClient:     syncClient,
@@ -126,6 +127,8 @@ func NewServer(cfg *config.Config, store *accounts.Store, syncClient *cliproxy.C
 			)
 		},
 	}
+	server.imageTasks = newImageTaskManager(server)
+	return server
 }
 
 func (s *Server) getStore() *accounts.Store {
@@ -386,6 +389,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/accounts/refresh-all", s.requireUIAuth(http.HandlerFunc(s.handleRefreshAllAccounts)))
 	mux.Handle("GET /api/accounts/refresh-progress", s.requireUIAuth(http.HandlerFunc(s.handleAccountRefreshProgress)))
 	mux.Handle("POST /api/accounts/update", s.requireUIAuth(http.HandlerFunc(s.handleUpdateAccount)))
+	mux.Handle("GET /api/accounts/image-policy", s.requireUIAuth(http.HandlerFunc(s.handleGetImageAccountPolicy)))
+	mux.Handle("PUT /api/accounts/image-policy", s.requireUIAuth(http.HandlerFunc(s.handleUpdateImageAccountPolicy)))
 	mux.Handle("GET /api/config", s.requireUIAuth(http.HandlerFunc(s.handleGetConfig)))
 	mux.Handle("GET /api/config/defaults", s.requireUIAuth(http.HandlerFunc(s.handleGetDefaultConfig)))
 	mux.Handle("PUT /api/config", s.requireUIAuth(http.HandlerFunc(s.handleUpdateConfig)))
@@ -406,6 +411,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/image/conversations/{id}", s.requireUIAuth(http.HandlerFunc(s.handleGetImageConversation)))
 	mux.Handle("PUT /api/image/conversations/{id}", s.requireUIAuth(http.HandlerFunc(s.handleSaveImageConversation)))
 	mux.Handle("DELETE /api/image/conversations/{id}", s.requireUIAuth(http.HandlerFunc(s.handleDeleteImageConversation)))
+	mux.Handle("POST /api/image/tasks", s.requireUIAuth(http.HandlerFunc(s.handleCreateImageTask)))
+	mux.Handle("GET /api/image/tasks", s.requireUIAuth(http.HandlerFunc(s.handleListImageTasks)))
+	mux.Handle("GET /api/image/tasks/snapshot", s.requireUIAuth(http.HandlerFunc(s.handleImageTaskSnapshot)))
+	mux.Handle("GET /api/image/tasks/stream", s.requireUIAuth(http.HandlerFunc(s.handleImageTaskStream)))
+	mux.Handle("GET /api/image/tasks/{id}", s.requireUIAuth(http.HandlerFunc(s.handleGetImageTask)))
+	mux.Handle("DELETE /api/image/tasks/{id}", s.requireUIAuth(http.HandlerFunc(s.handleCancelImageTask)))
 
 	mux.Handle("POST /v1/images/generations", s.requireImageAuth(http.HandlerFunc(s.handleImageGenerations)))
 	mux.Handle("POST /v1/images/edits", s.requireImageAuth(http.HandlerFunc(s.handleImageEdits)))
@@ -857,24 +868,30 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inpaintRequest := parseInpaintRequest(r)
+	var payload map[string]any
 	var data []map[string]any
+	var execErr error
 	if inpaintRequest.originalFileID != "" && inpaintRequest.originalGenID != "" {
-		if len(mask) == 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "mask is required for selection edit"})
+		if strings.TrimSpace(inpaintRequest.sourceAccountID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source_account_id is required for selection edit"})
 			return
 		}
-		data, err = s.withImageResultsWithMetadata(r.Context(), "selection-edit", responseFormat, inpaintRequest.sourceAccountID, requestedModel, false, newImageRequestMetadata(prompt, "", ""), func(client imageWorkflowClient, upstreamModel string) ([]handler.ImageResult, error) {
-			return client.InpaintImageByMask(
-				r.Context(),
-				prompt,
-				upstreamModel,
-				inpaintRequest.originalFileID,
-				inpaintRequest.originalGenID,
-				inpaintRequest.conversationID,
-				inpaintRequest.parentMessageID,
-				mask,
-			)
+		payload, execErr = s.executeImageSelectionEdit(r.Context(), imageSelectionEditRequest{
+			Model:           requestedModel,
+			Prompt:          prompt,
+			Mask:            mask,
+			OriginalFileID:  inpaintRequest.originalFileID,
+			OriginalGenID:   inpaintRequest.originalGenID,
+			ConversationID:  inpaintRequest.conversationID,
+			ParentMessageID: inpaintRequest.parentMessageID,
+			SourceAccountID: inpaintRequest.sourceAccountID,
+			ResponseFormat:  responseFormat,
 		}, r)
+		if execErr != nil {
+			err = execErr
+		} else {
+			data = compatResponseDataItems(payload)
+		}
 	} else {
 		images, readErr := readImagesFromMultipart(r.MultipartForm)
 		if readErr != nil {
@@ -886,7 +903,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		payload, execErr := s.executeImageEdit(r.Context(), imageEditRequest{
+		payload, execErr = s.executeImageEdit(r.Context(), imageEditRequest{
 			Model:          requestedModel,
 			Prompt:         prompt,
 			Images:         images,
@@ -903,6 +920,10 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeImageRequestError(w, err)
+		return
+	}
+	if payload != nil {
+		writeJSON(w, http.StatusOK, payload)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
@@ -1190,6 +1211,10 @@ func (s *Server) runPureCPAImageRequest(
 }
 
 func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAuth, account accounts.PublicAccount, releaseLease func(), routingDecision accounts.ImageAccountRoutingDecision, operation, responseFormat string, preferredAccount bool, requestedModel string, responsesEligible bool, metadata imageRequestMetadata, run func(client imageWorkflowClient, upstreamModel string) ([]handler.ImageResult, error), r *http.Request) ([]map[string]any, bool, error) {
+	return s.runImageRequestWithAdmission(ctx, authFile, account, releaseLease, routingDecision, operation, responseFormat, preferredAccount, requestedModel, responsesEligible, metadata, run, r, true)
+}
+
+func (s *Server) runImageRequestWithAdmission(ctx context.Context, authFile *accounts.LocalAuth, account accounts.PublicAccount, releaseLease func(), routingDecision accounts.ImageAccountRoutingDecision, operation, responseFormat string, preferredAccount bool, requestedModel string, responsesEligible bool, metadata imageRequestMetadata, run func(client imageWorkflowClient, upstreamModel string) ([]handler.ImageResult, error), r *http.Request, useAdmission bool) ([]map[string]any, bool, error) {
 	store := s.getStore()
 	if releaseLease != nil {
 		defer releaseLease()
@@ -1248,38 +1273,43 @@ func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAu
 	}
 
 	mode := s.configuredImageMode()
-	admissionInfo, releaseAdmission, admissionErr := s.acquireImageAdmission(ctx)
-	if admissionErr != nil {
-		err := admissionErr
-		if errors.Is(admissionErr, errImageAdmissionQueueFull) {
-			err = newRequestError("image_queue_full", "当前图片请求排队已满，请稍后再试")
-		} else if errors.Is(admissionErr, errImageAdmissionQueueTimeout) {
-			err = newRequestError("image_queue_timeout", "当前图片请求排队超时，请稍后再试")
+	admissionInfo := imageAdmissionInfo{}
+	releaseAdmission := func() {}
+	if useAdmission {
+		var admissionErr error
+		admissionInfo, releaseAdmission, admissionErr = s.acquireImageAdmission(ctx)
+		if admissionErr != nil {
+			err := admissionErr
+			if errors.Is(admissionErr, errImageAdmissionQueueFull) {
+				err = newRequestError("image_queue_full", "当前图片请求排队已满，请稍后再试")
+			} else if errors.Is(admissionErr, errImageAdmissionQueueTimeout) {
+				err = newRequestError("image_queue_timeout", "当前图片请求排队超时，请稍后再试")
+			}
+			entry := imageRequestLogEntry{
+				StartedAt:            startedAt.Format(time.RFC3339Nano),
+				FinishedAt:           time.Now().Format(time.RFC3339Nano),
+				Endpoint:             r.URL.Path,
+				Operation:            operation,
+				ImageMode:            mode,
+				AccountType:          account.Type,
+				AccountEmail:         account.Email,
+				AccountFile:          authFile.Name,
+				RequestedModel:       requestedModel,
+				Preferred:            preferredAccount,
+				Success:              false,
+				Error:                err.Error(),
+				LeaseAcquired:        releaseLease != nil,
+				QueueWaitMS:          admissionInfo.QueueWaitMS,
+				InflightCountAtStart: admissionInfo.InflightCountAtStart,
+			}
+			if requestErr, ok := err.(*requestError); ok {
+				entry.ErrorCode = requestErr.code
+			}
+			applyImageRoutingLogFields(routingDecision, &entry)
+			metadata.applyTo(&entry)
+			s.logImageRequest(entry)
+			return nil, false, err
 		}
-		entry := imageRequestLogEntry{
-			StartedAt:            startedAt.Format(time.RFC3339Nano),
-			FinishedAt:           time.Now().Format(time.RFC3339Nano),
-			Endpoint:             r.URL.Path,
-			Operation:            operation,
-			ImageMode:            mode,
-			AccountType:          account.Type,
-			AccountEmail:         account.Email,
-			AccountFile:          authFile.Name,
-			RequestedModel:       requestedModel,
-			Preferred:            preferredAccount,
-			Success:              false,
-			Error:                err.Error(),
-			LeaseAcquired:        releaseLease != nil,
-			QueueWaitMS:          admissionInfo.QueueWaitMS,
-			InflightCountAtStart: admissionInfo.InflightCountAtStart,
-		}
-		if requestErr, ok := err.(*requestError); ok {
-			entry.ErrorCode = requestErr.code
-		}
-		applyImageRoutingLogFields(routingDecision, &entry)
-		metadata.applyTo(&entry)
-		s.logImageRequest(entry)
-		return nil, false, err
 	}
 	defer releaseAdmission()
 	ctx = withImageAdmissionInfo(ctx, admissionInfo)
@@ -1357,7 +1387,11 @@ func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAu
 		}
 	}
 	if imageToolModel == "" {
-		imageToolModel = strings.TrimSpace(resolveLoggedImageToolModel(requestedModel))
+		if strings.EqualFold(route, "responses") {
+			imageToolModel = strings.TrimSpace(upstreamModel)
+		} else {
+			imageToolModel = strings.TrimSpace(resolveLoggedImageToolModel(requestedModel))
+		}
 	}
 	admissionInfo = imageAdmissionFromContext(ctx)
 	if err != nil {
@@ -1395,6 +1429,9 @@ func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAu
 			if preferredAccount {
 				return nil, false, newRequestError("source_account_rate_limited", "原始图片所属账号当前已限流，请稍后重试或使用普通编辑")
 			}
+			return nil, true, err
+		}
+		if isTransientImageStreamError(err) {
 			return nil, true, err
 		}
 		if isInvalidImageTokenError(err) {
@@ -1527,6 +1564,11 @@ func (s *Server) handleWebApp(w http.ResponseWriter, r *http.Request) {
 	if asset == "" {
 		http.NotFound(w, r)
 		return
+	}
+	if strings.HasSuffix(strings.ToLower(asset), ".html") {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
 	}
 	http.ServeFile(w, r, asset)
 }
@@ -1867,6 +1909,29 @@ func isImageRateLimitError(err error) bool {
 		"image generation limit",
 		"image generation quota",
 		"限流",
+	} {
+		if strings.Contains(message, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTransientImageStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, token := range []string{
+		"sse read error",
+		"responses sse read error",
+		"stream error",
+		"internal_error",
+		"received from peer",
+		"unexpected eof",
+		"http2: client connection lost",
+		"connection reset by peer",
+		"stream closed",
 	} {
 		if strings.Contains(message, token) {
 			return true

@@ -133,8 +133,8 @@ export function RuntimeSection({ config, setSection }: RuntimeSectionProps) {
         />
       </Field>
       <Field
-        label="图片排队超时（秒）"
-        hint="排队等待超过这个时间后，请求会直接返回超时。"
+        label="图片准入排队超时（秒）"
+        hint="超出并发上限后，在 admission 队列里等待超过这个时间，请求会直接返回超时。"
       >
         <Input
           type="number"
@@ -143,6 +143,22 @@ export function RuntimeSection({ config, setSection }: RuntimeSectionProps) {
             setSection("server", {
               ...config.server,
               imageQueueTimeoutSeconds: Number(event.target.value || 0),
+            })
+          }
+          className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
+        />
+      </Field>
+      <Field
+        label="任务队列过期（秒）"
+        hint="任务创建后如果一直没有真正开跑，超过这个时间会在工作台里标记为已过期。建议明显大于准入排队超时。"
+      >
+        <Input
+          type="number"
+          value={String(config.server.imageTaskQueueTtlSeconds)}
+          onChange={(event) =>
+            setSection("server", {
+              ...config.server,
+              imageTaskQueueTtlSeconds: Number(event.target.value || 0),
             })
           }
           className="h-11 rounded-2xl border-stone-200 bg-white shadow-none"
