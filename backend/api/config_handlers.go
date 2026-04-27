@@ -21,9 +21,12 @@ type configPayload struct {
 		MaxUploadSizeMB int    `json:"maxUploadSizeMB"`
 	} `json:"app"`
 	Server struct {
-		Host      string `json:"host"`
-		Port      int    `json:"port"`
-		StaticDir string `json:"staticDir"`
+		Host                     string `json:"host"`
+		Port                     int    `json:"port"`
+		StaticDir                string `json:"staticDir"`
+		MaxImageConcurrency      int    `json:"maxImageConcurrency"`
+		ImageQueueLimit          int    `json:"imageQueueLimit"`
+		ImageQueueTimeoutSeconds int    `json:"imageQueueTimeoutSeconds"`
 	} `json:"server"`
 	ChatGPT struct {
 		Model                            string `json:"model"`
@@ -39,9 +42,10 @@ type configPayload struct {
 		StudioAllowDisabledImageAccounts bool   `json:"studioAllowDisabledImageAccounts"`
 	} `json:"chatgpt"`
 	Accounts struct {
-		DefaultQuota        int  `json:"defaultQuota"`
-		PreferRemoteRefresh bool `json:"preferRemoteRefresh"`
-		RefreshWorkers      int  `json:"refreshWorkers"`
+		DefaultQuota                int  `json:"defaultQuota"`
+		PreferRemoteRefresh         bool `json:"preferRemoteRefresh"`
+		RefreshWorkers              int  `json:"refreshWorkers"`
+		ImageQuotaRefreshTTLSeconds int  `json:"imageQuotaRefreshTTLSeconds"`
 	} `json:"accounts"`
 	Storage struct {
 		Backend                  string `json:"backend"`
@@ -141,9 +145,12 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			"max_upload_size_mb": payload.App.MaxUploadSizeMB,
 		},
 		"server": {
-			"host":       payload.Server.Host,
-			"port":       payload.Server.Port,
-			"static_dir": payload.Server.StaticDir,
+			"host":                        payload.Server.Host,
+			"port":                        payload.Server.Port,
+			"static_dir":                  payload.Server.StaticDir,
+			"max_image_concurrency":       payload.Server.MaxImageConcurrency,
+			"image_queue_limit":           payload.Server.ImageQueueLimit,
+			"image_queue_timeout_seconds": payload.Server.ImageQueueTimeoutSeconds,
 		},
 		"chatgpt": {
 			"model":                                payload.ChatGPT.Model,
@@ -159,9 +166,10 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			"studio_allow_disabled_image_accounts": payload.ChatGPT.StudioAllowDisabledImageAccounts,
 		},
 		"accounts": {
-			"default_quota":         payload.Accounts.DefaultQuota,
-			"prefer_remote_refresh": payload.Accounts.PreferRemoteRefresh,
-			"refresh_workers":       payload.Accounts.RefreshWorkers,
+			"default_quota":                   payload.Accounts.DefaultQuota,
+			"prefer_remote_refresh":           payload.Accounts.PreferRemoteRefresh,
+			"refresh_workers":                 payload.Accounts.RefreshWorkers,
+			"image_quota_refresh_ttl_seconds": payload.Accounts.ImageQuotaRefreshTTLSeconds,
 		},
 		"storage": {
 			"backend":                    payload.Storage.Backend,
@@ -264,6 +272,9 @@ func (s *Server) buildConfigPayloadFromConfig(cfg *config.Config) configPayload 
 	payload.Server.Host = cfg.Server.Host
 	payload.Server.Port = cfg.Server.Port
 	payload.Server.StaticDir = cfg.Server.StaticDir
+	payload.Server.MaxImageConcurrency = cfg.Server.MaxImageConcurrency
+	payload.Server.ImageQueueLimit = cfg.Server.ImageQueueLimit
+	payload.Server.ImageQueueTimeoutSeconds = cfg.Server.ImageQueueTimeoutSeconds
 
 	payload.ChatGPT.Model = cfg.ChatGPT.Model
 	payload.ChatGPT.SSETimeout = cfg.ChatGPT.SSETimeout
@@ -280,6 +291,7 @@ func (s *Server) buildConfigPayloadFromConfig(cfg *config.Config) configPayload 
 	payload.Accounts.DefaultQuota = cfg.Accounts.DefaultQuota
 	payload.Accounts.PreferRemoteRefresh = cfg.Accounts.PreferRemoteRefresh
 	payload.Accounts.RefreshWorkers = cfg.Accounts.RefreshWorkers
+	payload.Accounts.ImageQuotaRefreshTTLSeconds = cfg.Accounts.ImageQuotaRefreshTTLSeconds
 
 	payload.Storage.Backend = cfg.Storage.Backend
 	payload.Storage.ConfigBackend = cfg.Storage.ConfigBackend

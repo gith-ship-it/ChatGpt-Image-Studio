@@ -38,6 +38,7 @@ type Server struct {
 	accountRefreshRun      *accountRefreshRunResult
 	staticDir              string
 	reqLogs                *imageRequestLogStore
+	imageAdmission         *imageAdmissionController
 	officialClientFactory  func(accessToken, proxyURL string, authData map[string]any, requestConfig handler.ImageRequestConfig) imageWorkflowClient
 	responsesClientFactory func(accessToken, proxyURL string, authData map[string]any, requestConfig handler.ImageRequestConfig) imageWorkflowClient
 	cpaClientFactory       func(baseURL, apiKey string, timeout time.Duration, routeStrategy string) cpaRouteAwareImageWorkflowClient
@@ -78,12 +79,13 @@ func (e *requestError) Error() string {
 
 func NewServer(cfg *config.Config, store *accounts.Store, syncClient *cliproxy.Client) *Server {
 	return &Server{
-		cfg:          cfg,
-		store:        store,
-		syncClient:   syncClient,
-		syncRunCache: map[string]*sourceSyncRunResult{},
-		staticDir:    cfg.ResolvePath(cfg.Server.StaticDir),
-		reqLogs:      newImageRequestLogStore(),
+		cfg:            cfg,
+		store:          store,
+		syncClient:     syncClient,
+		syncRunCache:   map[string]*sourceSyncRunResult{},
+		staticDir:      cfg.ResolvePath(cfg.Server.StaticDir),
+		reqLogs:        newImageRequestLogStore(),
+		imageAdmission: newImageAdmissionController(),
 		officialClientFactory: func(accessToken, proxyURL string, authData map[string]any, requestConfig handler.ImageRequestConfig) imageWorkflowClient {
 			return handler.NewChatGPTClientWithProxyAndConfig(
 				accessToken,
@@ -392,6 +394,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/integration/newapi/token", s.requireUIAuth(http.HandlerFunc(s.handleNewAPITokenDiscover)))
 	mux.Handle("POST /api/integration/sub2api/groups", s.requireUIAuth(http.HandlerFunc(s.handleSub2APIGroups)))
 	mux.Handle("GET /api/requests", s.requireUIAuth(http.HandlerFunc(s.handleListRequestLogs)))
+	mux.Handle("GET /api/startup/check", s.requireUIAuth(http.HandlerFunc(s.handleStartupCheck)))
+	mux.Handle("GET /api/runtime/status", s.requireUIAuth(http.HandlerFunc(s.handleRuntimeStatus)))
+	mux.Handle("GET /api/diagnostics/export", s.requireUIAuth(http.HandlerFunc(s.handleExportDiagnostics)))
+	mux.Handle("POST /api/tools/admission-stress", s.requireUIAuth(http.HandlerFunc(s.handleAdmissionStress)))
 	mux.Handle("GET /api/sync/status", s.requireUIAuth(http.HandlerFunc(s.handleSyncStatus)))
 	mux.Handle("POST /api/sync/run", s.requireUIAuth(http.HandlerFunc(s.handleRunSync)))
 	mux.Handle("GET /api/image/conversations", s.requireUIAuth(http.HandlerFunc(s.handleListImageConversations)))
@@ -958,28 +964,43 @@ func (s *Server) withImageResultsFilteredWithMetadata(
 	if mode == "cpa" {
 		return s.runPureCPAImageRequest(ctx, operation, responseFormat, requestedModel, strings.TrimSpace(preferredAccountID) != "", metadata, run, r)
 	}
+	policy, err := parseRequestImageAccountRoutingPolicy(r)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(preferredAccountID) != "" {
-		authFile, account, err := store.FindImageAuthByID(preferredAccountID)
+		authFile, account, releaseLease, err := store.FindImageAuthByIDWithLease(preferredAccountID)
 		if err != nil {
 			if errors.Is(err, accounts.ErrSourceAccountNotFound) {
 				return nil, newRequestError("source_account_not_found", "原始图片所属账号不存在，请使用普通编辑重试")
 			}
 			return nil, err
 		}
-		data, _, err := s.runImageRequest(ctx, authFile, account, operation, responseFormat, true, requestedModel, responsesEligible, metadata, run, r)
+		data, _, err := s.runImageRequest(ctx, authFile, account, releaseLease, accounts.ImageAccountRoutingDecision{}, operation, responseFormat, true, requestedModel, responsesEligible, metadata, run, r)
 		return data, err
 	}
 
 	attempted := map[string]struct{}{}
 	var lastRetryableErr error
 	for {
-		authFile, account, err := store.AcquireImageAuthFilteredWithDisabledOption(attempted, allowAccount, s.allowDisabledStudioImageAccounts())
+		var (
+			authFile     *accounts.LocalAuth
+			account      accounts.PublicAccount
+			releaseLease func()
+			decision     accounts.ImageAccountRoutingDecision
+			err          error
+		)
+		if policy != nil {
+			authFile, account, decision, releaseLease, err = store.AcquireImageAuthLeaseWithPolicyFilteredWithDisabledOption(attempted, allowAccount, s.allowDisabledStudioImageAccounts(), policy)
+		} else {
+			authFile, account, releaseLease, err = store.AcquireImageAuthLeaseFilteredWithDisabledOption(attempted, allowAccount, s.allowDisabledStudioImageAccounts())
+		}
 		if err != nil {
 			return nil, resolveImageAcquireError(mode, err, lastRetryableErr)
 		}
 		attempted[authFile.AccessToken] = struct{}{}
 
-		data, retryable, err := s.runImageRequest(ctx, authFile, account, operation, responseFormat, false, requestedModel, responsesEligible, metadata, run, r)
+		data, retryable, err := s.runImageRequest(ctx, authFile, account, releaseLease, decision, operation, responseFormat, false, requestedModel, responsesEligible, metadata, run, r)
 		if retryable && len(attempted) < 64 {
 			lastRetryableErr = err
 			continue
@@ -1031,6 +1052,9 @@ func (s *Server) newCPAWorkflowClient() cpaRouteAwareImageWorkflowClient {
 }
 
 func resolveImageAcquireError(mode string, err, lastRetryableErr error) error {
+	if errors.Is(err, accounts.ErrSelectedImageGroupsExhausted) {
+		return newRequestError("selected_image_groups_exhausted", "当前选中的图片账号分组已经全部用尽，请调整分组或稍后重试")
+	}
 	if !errors.Is(err, accounts.ErrNoAvailableImageAuth) {
 		return err
 	}
@@ -1075,6 +1099,40 @@ func (s *Server) runPureCPAImageRequest(
 		return nil, err
 	}
 
+	admissionInfo, releaseAdmission, admissionErr := s.acquireImageAdmission(ctx)
+	if admissionErr != nil {
+		err := admissionErr
+		if errors.Is(admissionErr, errImageAdmissionQueueFull) {
+			err = newRequestError("image_queue_full", "当前图片请求排队已满，请稍后再试")
+		} else if errors.Is(admissionErr, errImageAdmissionQueueTimeout) {
+			err = newRequestError("image_queue_timeout", "当前图片请求排队超时，请稍后再试")
+		}
+		entry := imageRequestLogEntry{
+			StartedAt:            startedAt.Format(time.RFC3339Nano),
+			FinishedAt:           time.Now().Format(time.RFC3339Nano),
+			Endpoint:             r.URL.Path,
+			Operation:            operation,
+			ImageMode:            "cpa",
+			Direction:            "cpa",
+			Route:                "cpa",
+			CPASubroute:          s.cfg.CPAImageRouteStrategy(),
+			RequestedModel:       requestedModel,
+			Preferred:            preferredAccount,
+			Success:              false,
+			Error:                err.Error(),
+			QueueWaitMS:          admissionInfo.QueueWaitMS,
+			InflightCountAtStart: admissionInfo.InflightCountAtStart,
+		}
+		if requestErr, ok := err.(*requestError); ok {
+			entry.ErrorCode = requestErr.code
+		}
+		metadata.applyTo(&entry)
+		s.logImageRequest(entry)
+		return nil, err
+	}
+	defer releaseAdmission()
+	ctx = withImageAdmissionInfo(ctx, admissionInfo)
+
 	client := s.newCPAWorkflowClient()
 	upstreamModel := cpaFixedImageModel
 	results, err := run(client, upstreamModel)
@@ -1083,49 +1141,62 @@ func (s *Server) runPureCPAImageRequest(
 		upstreamModel = label
 	}
 	if err != nil {
+		admissionInfo := imageAdmissionFromContext(ctx)
 		entry := imageRequestLogEntry{
-			StartedAt:      startedAt.Format(time.RFC3339Nano),
-			FinishedAt:     time.Now().Format(time.RFC3339Nano),
-			Endpoint:       r.URL.Path,
-			Operation:      operation,
-			ImageMode:      "cpa",
-			Direction:      "cpa",
-			Route:          "cpa",
-			CPASubroute:    cpaSubroute,
-			RequestedModel: requestedModel,
-			UpstreamModel:  upstreamModel,
-			Preferred:      preferredAccount,
-			Success:        false,
-			Error:          err.Error(),
+			StartedAt:            startedAt.Format(time.RFC3339Nano),
+			FinishedAt:           time.Now().Format(time.RFC3339Nano),
+			Endpoint:             r.URL.Path,
+			Operation:            operation,
+			ImageMode:            "cpa",
+			Direction:            "cpa",
+			Route:                "cpa",
+			CPASubroute:          cpaSubroute,
+			RequestedModel:       requestedModel,
+			UpstreamModel:        upstreamModel,
+			Preferred:            preferredAccount,
+			Success:              false,
+			Error:                err.Error(),
+			QueueWaitMS:          admissionInfo.QueueWaitMS,
+			InflightCountAtStart: admissionInfo.InflightCountAtStart,
+		}
+		if requestErr, ok := err.(*requestError); ok {
+			entry.ErrorCode = requestErr.code
 		}
 		metadata.applyTo(&entry)
 		s.logImageRequest(entry)
 		return nil, err
 	}
 
+	admissionInfo = imageAdmissionFromContext(ctx)
 	entry := imageRequestLogEntry{
-		StartedAt:      startedAt.Format(time.RFC3339Nano),
-		FinishedAt:     time.Now().Format(time.RFC3339Nano),
-		Endpoint:       r.URL.Path,
-		Operation:      operation,
-		ImageMode:      "cpa",
-		Direction:      "cpa",
-		Route:          "cpa",
-		CPASubroute:    cpaSubroute,
-		RequestedModel: requestedModel,
-		UpstreamModel:  upstreamModel,
-		Preferred:      preferredAccount,
-		Success:        true,
+		StartedAt:            startedAt.Format(time.RFC3339Nano),
+		FinishedAt:           time.Now().Format(time.RFC3339Nano),
+		Endpoint:             r.URL.Path,
+		Operation:            operation,
+		ImageMode:            "cpa",
+		Direction:            "cpa",
+		Route:                "cpa",
+		CPASubroute:          cpaSubroute,
+		RequestedModel:       requestedModel,
+		UpstreamModel:        upstreamModel,
+		Preferred:            preferredAccount,
+		Success:              true,
+		QueueWaitMS:          admissionInfo.QueueWaitMS,
+		InflightCountAtStart: admissionInfo.InflightCountAtStart,
 	}
 	metadata.applyTo(&entry)
 	s.logImageRequest(entry)
 	return buildImageResponse(r, client, results, responseFormat, "", s.cfg.ResolvePath(s.cfg.Storage.ImageDir)), nil
 }
 
-func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAuth, account accounts.PublicAccount, operation, responseFormat string, preferredAccount bool, requestedModel string, responsesEligible bool, metadata imageRequestMetadata, run func(client imageWorkflowClient, upstreamModel string) ([]handler.ImageResult, error), r *http.Request) ([]map[string]any, bool, error) {
+func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAuth, account accounts.PublicAccount, releaseLease func(), routingDecision accounts.ImageAccountRoutingDecision, operation, responseFormat string, preferredAccount bool, requestedModel string, responsesEligible bool, metadata imageRequestMetadata, run func(client imageWorkflowClient, upstreamModel string) ([]handler.ImageResult, error), r *http.Request) ([]map[string]any, bool, error) {
 	store := s.getStore()
+	if releaseLease != nil {
+		defer releaseLease()
+	}
 	startedAt := time.Now()
-	refreshRequired := account.SourceKind == accounts.AccountSourceKindToken || accounts.NeedsImageQuotaRefresh(account, time.Now())
+	now := time.Now()
+	refreshRequired := account.SourceKind == accounts.AccountSourceKindToken || accounts.NeedsImageQuotaRefreshWithTTL(account, now, s.cfg.ImageQuotaRefreshTTL())
 	if refreshRequired {
 		_, refreshErrors, refreshErr := store.RefreshAccounts(ctx, []string{authFile.AccessToken})
 		if refreshErr == nil {
@@ -1167,8 +1238,51 @@ func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAu
 	if preferredAccount && !isImageAccountUsable(account, s.allowDisabledStudioImageAccounts()) {
 		return nil, false, newRequestError("source_account_unavailable", "原始图片所属账号当前不可用，请使用普通编辑重试")
 	}
+	if routingDecision.PolicyApplied && !store.ImageAccountAllowedForPolicy(authFile.AccessToken, account, &accounts.ImageAccountRoutingPolicy{
+		Enabled:        true,
+		SortMode:       routingDecision.SortMode,
+		ReservePercent: routingDecision.ReservePercent,
+		ReserveMode:    "daily_first_seen_percent",
+	}) {
+		return nil, true, newRequestError("image_account_reserved", "当前账号已触发分组保底阈值，正在切换下一个账号")
+	}
 
 	mode := s.configuredImageMode()
+	admissionInfo, releaseAdmission, admissionErr := s.acquireImageAdmission(ctx)
+	if admissionErr != nil {
+		err := admissionErr
+		if errors.Is(admissionErr, errImageAdmissionQueueFull) {
+			err = newRequestError("image_queue_full", "当前图片请求排队已满，请稍后再试")
+		} else if errors.Is(admissionErr, errImageAdmissionQueueTimeout) {
+			err = newRequestError("image_queue_timeout", "当前图片请求排队超时，请稍后再试")
+		}
+		entry := imageRequestLogEntry{
+			StartedAt:            startedAt.Format(time.RFC3339Nano),
+			FinishedAt:           time.Now().Format(time.RFC3339Nano),
+			Endpoint:             r.URL.Path,
+			Operation:            operation,
+			ImageMode:            mode,
+			AccountType:          account.Type,
+			AccountEmail:         account.Email,
+			AccountFile:          authFile.Name,
+			RequestedModel:       requestedModel,
+			Preferred:            preferredAccount,
+			Success:              false,
+			Error:                err.Error(),
+			LeaseAcquired:        releaseLease != nil,
+			QueueWaitMS:          admissionInfo.QueueWaitMS,
+			InflightCountAtStart: admissionInfo.InflightCountAtStart,
+		}
+		if requestErr, ok := err.(*requestError); ok {
+			entry.ErrorCode = requestErr.code
+		}
+		applyImageRoutingLogFields(routingDecision, &entry)
+		metadata.applyTo(&entry)
+		s.logImageRequest(entry)
+		return nil, false, err
+	}
+	defer releaseAdmission()
+	ctx = withImageAdmissionInfo(ctx, admissionInfo)
 	var (
 		client         imageWorkflowClient
 		upstreamModel  string
@@ -1180,22 +1294,29 @@ func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAu
 		if !s.cfg.CPAImageConfigured() {
 			err := newRequestError("cpa_image_not_configured", "CPA 图片接口还未配置，请先在配置管理中设置 CPA base_url 与 api_key")
 			entry := imageRequestLogEntry{
-				StartedAt:      startedAt.Format(time.RFC3339Nano),
-				FinishedAt:     time.Now().Format(time.RFC3339Nano),
-				Endpoint:       r.URL.Path,
-				Operation:      operation,
-				ImageMode:      mode,
-				Direction:      "cpa",
-				Route:          "cpa",
-				CPASubroute:    s.cfg.CPAImageRouteStrategy(),
-				AccountType:    account.Type,
-				AccountEmail:   account.Email,
-				AccountFile:    authFile.Name,
-				RequestedModel: requestedModel,
-				Preferred:      preferredAccount,
-				Success:        false,
-				Error:          err.Error(),
+				StartedAt:            startedAt.Format(time.RFC3339Nano),
+				FinishedAt:           time.Now().Format(time.RFC3339Nano),
+				Endpoint:             r.URL.Path,
+				Operation:            operation,
+				ImageMode:            mode,
+				Direction:            "cpa",
+				Route:                "cpa",
+				CPASubroute:          s.cfg.CPAImageRouteStrategy(),
+				AccountType:          account.Type,
+				AccountEmail:         account.Email,
+				AccountFile:          authFile.Name,
+				RequestedModel:       requestedModel,
+				Preferred:            preferredAccount,
+				Success:              false,
+				Error:                err.Error(),
+				LeaseAcquired:        releaseLease != nil,
+				QueueWaitMS:          admissionInfo.QueueWaitMS,
+				InflightCountAtStart: admissionInfo.InflightCountAtStart,
 			}
+			if requestErr, ok := err.(*requestError); ok {
+				entry.ErrorCode = requestErr.code
+			}
+			applyImageRoutingLogFields(routingDecision, &entry)
 			metadata.applyTo(&entry)
 			s.logImageRequest(entry)
 			return nil, false, err
@@ -1238,27 +1359,35 @@ func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAu
 	if imageToolModel == "" {
 		imageToolModel = strings.TrimSpace(resolveLoggedImageToolModel(requestedModel))
 	}
+	admissionInfo = imageAdmissionFromContext(ctx)
 	if err != nil {
 		store.RecordImageResult(authFile.AccessToken, false)
 		entry := imageRequestLogEntry{
-			StartedAt:      startedAt.Format(time.RFC3339Nano),
-			FinishedAt:     time.Now().Format(time.RFC3339Nano),
-			Endpoint:       r.URL.Path,
-			Operation:      operation,
-			ImageMode:      mode,
-			Direction:      direction,
-			Route:          route,
-			CPASubroute:    cpaSubroute,
-			AccountType:    account.Type,
-			AccountEmail:   account.Email,
-			AccountFile:    authFile.Name,
-			RequestedModel: requestedModel,
-			UpstreamModel:  upstreamModel,
-			ImageToolModel: imageToolModel,
-			Preferred:      preferredAccount,
-			Success:        false,
-			Error:          err.Error(),
+			StartedAt:            startedAt.Format(time.RFC3339Nano),
+			FinishedAt:           time.Now().Format(time.RFC3339Nano),
+			Endpoint:             r.URL.Path,
+			Operation:            operation,
+			ImageMode:            mode,
+			Direction:            direction,
+			Route:                route,
+			CPASubroute:          cpaSubroute,
+			AccountType:          account.Type,
+			AccountEmail:         account.Email,
+			AccountFile:          authFile.Name,
+			RequestedModel:       requestedModel,
+			UpstreamModel:        upstreamModel,
+			ImageToolModel:       imageToolModel,
+			Preferred:            preferredAccount,
+			Success:              false,
+			Error:                err.Error(),
+			LeaseAcquired:        releaseLease != nil,
+			QueueWaitMS:          admissionInfo.QueueWaitMS,
+			InflightCountAtStart: admissionInfo.InflightCountAtStart,
 		}
+		if requestErr, ok := err.(*requestError); ok {
+			entry.ErrorCode = requestErr.code
+		}
+		applyImageRoutingLogFields(routingDecision, &entry)
 		metadata.applyTo(&entry)
 		s.logImageRequest(entry)
 		if isImageRateLimitError(err) {
@@ -1283,23 +1412,27 @@ func (s *Server) runImageRequest(ctx context.Context, authFile *accounts.LocalAu
 
 	store.RecordImageResult(authFile.AccessToken, true)
 	entry := imageRequestLogEntry{
-		StartedAt:      startedAt.Format(time.RFC3339Nano),
-		FinishedAt:     time.Now().Format(time.RFC3339Nano),
-		Endpoint:       r.URL.Path,
-		Operation:      operation,
-		ImageMode:      mode,
-		Direction:      direction,
-		Route:          route,
-		CPASubroute:    cpaSubroute,
-		AccountType:    account.Type,
-		AccountEmail:   account.Email,
-		AccountFile:    authFile.Name,
-		RequestedModel: requestedModel,
-		UpstreamModel:  upstreamModel,
-		ImageToolModel: imageToolModel,
-		Preferred:      preferredAccount,
-		Success:        true,
+		StartedAt:            startedAt.Format(time.RFC3339Nano),
+		FinishedAt:           time.Now().Format(time.RFC3339Nano),
+		Endpoint:             r.URL.Path,
+		Operation:            operation,
+		ImageMode:            mode,
+		Direction:            direction,
+		Route:                route,
+		CPASubroute:          cpaSubroute,
+		AccountType:          account.Type,
+		AccountEmail:         account.Email,
+		AccountFile:          authFile.Name,
+		RequestedModel:       requestedModel,
+		UpstreamModel:        upstreamModel,
+		ImageToolModel:       imageToolModel,
+		Preferred:            preferredAccount,
+		Success:              true,
+		LeaseAcquired:        releaseLease != nil,
+		QueueWaitMS:          admissionInfo.QueueWaitMS,
+		InflightCountAtStart: admissionInfo.InflightCountAtStart,
 	}
+	applyImageRoutingLogFields(routingDecision, &entry)
 	metadata.applyTo(&entry)
 	s.logImageRequest(entry)
 	return buildImageResponse(r, client, results, responseFormat, account.ID, s.cfg.ResolvePath(s.cfg.Storage.ImageDir)), false, nil

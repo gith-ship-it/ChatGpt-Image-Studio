@@ -71,6 +71,9 @@ function defaultConfigPayload(): ConfigPayload {
       host: "",
       port: 7000,
       staticDir: "",
+      maxImageConcurrency: 8,
+      imageQueueLimit: 32,
+      imageQueueTimeoutSeconds: 20,
     },
     chatgpt: {
       model: "gpt-image-2",
@@ -89,6 +92,7 @@ function defaultConfigPayload(): ConfigPayload {
       defaultQuota: 5,
       preferRemoteRefresh: true,
       refreshWorkers: 6,
+      imageQuotaRefreshTTLSeconds: 120,
     },
     storage: {
       backend: "current",
@@ -457,6 +461,17 @@ export default function SettingsPage() {
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 w-full justify-center rounded-full border-stone-200 bg-white px-3 text-[13px] text-stone-700 shadow-none sm:w-auto"
+                  onClick={() => {
+                    window.location.href = "/startup-check";
+                  }}
+                  disabled={isLoading || isSaving}
+                >
+                  启动体检
+                </Button>
                 <Button
                   type="button"
                   variant="outline"
